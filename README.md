@@ -44,6 +44,7 @@ On first run the server will:
 | `inbox.json` | Local message cache |
 | `destination_hash.txt` | Public 32-hex destination hash |
 | `daemon.log` | Always-on bridge file log |
+| `send.sock` | Unix IPC for outbound send while daemon holds RNS (mode `0600`) |
 | `webhook_fired.json` | Debounce set of webhook-fired message ids |
 
 Environment:
@@ -68,7 +69,7 @@ Public Ratspeak TCP nodes:
 | `ratspeak_status` | Presence, TCP online, interfaces, inbox count |
 | `ratspeak_identity` | Destination hash only (no private keys) |
 | `ratspeak_announce` | Announce LXMF delivery destination |
-| `ratspeak_send` | Send text message (`dest_hash`, `body`, optional `subject`) |
+| `ratspeak_send` | Send text message (`dest_hash`, `body`, optional `subject`); prefers daemon `send.sock` IPC when present |
 | `ratspeak_inbox` | Recent messages |
 | `ratspeak_read` | One message by `message_id` |
 
@@ -127,6 +128,7 @@ Behavior:
 
 - Starts `RatspeakBridge` (same identity / data home as the MCP tools)
 - Stays alive forever; re-announces about every **25 minutes**
+- Serves local send IPC at `$RATSPEAK_MCP_HOME/send.sock` (see below)
 - Logs to `$RATSPEAK_MCP_HOME/daemon.log` (and minimal status on stdout — **never private keys**)
 - On inbound delivery: if `source_hash` is allowlisted **and** `RATSPEAK_WEBHOOK_URL` is set, POSTs JSON:
 
@@ -145,6 +147,39 @@ Behavior:
 `content_preview` is truncated to ~200 characters. Auth header `Authorization: Bearer ${RATSPEAK_WEBHOOK_KEY}` is sent when the key env is set. HTTP failures soft-fail (mesh loop never crashes). Fired `message_id`s are debounced in `webhook_fired.json`.
 
 **Allowlist default:** if `RATSPEAK_WEBHOOK_ALLOWLIST` is unset, only source hash `60c8a4197d1de58a53f3a95a1c97f4af` triggers webhooks (this deploy). Set the env to a comma-separated list to override.
+
+### Local send IPC (outbound without stopping the daemon)
+
+While `ratspeak-bridge` holds the primary Reticulum instance, a second process (MCP stdio) often cannot send and may report **Not connected**. The daemon therefore listens on a Unix domain socket:
+
+- Path: `$RATSPEAK_MCP_HOME/send.sock` (mode `0600`)
+- Protocol: **newline-delimited JSON** (one request → one response)
+
+Request examples:
+
+```json
+{"op": "ping"}
+{"op": "status"}
+{"op": "send", "dest_hash": "<32 hex>", "body": "hello", "subject": ""}
+```
+
+`send` responses mirror `RatspeakBridge.send`: `ok`, `message_id`, `dest_hash`, `subject`, `method`, `lxmf_state`, `delivered` (plus `error` on failure). Private keys are never logged or returned.
+
+CLI (prints JSON on stdout):
+
+```bash
+# Ping / status (no mesh traffic)
+ratspeak-send --ping
+ratspeak-send --status
+# or:
+uv run python -m ratspeak_mcp.send_cli --ping
+
+# Send via the running daemon
+ratspeak-send 60c8a4197d1de58a53f3a95a1c97f4af "hello from IPC"
+ratspeak-send --subject "hi" DEST_HASH "body text"
+```
+
+MCP tool `ratspeak_send` **prefers this IPC** when `send.sock` exists, and only falls back to an in-process bridge if the socket is unavailable.
 
 ### systemd-ish example
 
@@ -180,7 +215,7 @@ nohup /workspace/ratspeak-mcp/.venv/bin/ratspeak-bridge >>/tmp/ratspeak-bridge.o
 
 ```bash
 cd /workspace/ratspeak-mcp
-uv run python -m unittest tests.test_webhook -v
+uv run python -m unittest tests.test_webhook tests.test_send_ipc -v
 ```
 
 ## Smoke test

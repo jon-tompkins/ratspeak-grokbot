@@ -3,6 +3,9 @@
 Starts RatspeakBridge, re-announces about every 25 minutes, and stays alive
 forever. File logging under the data home; private keys are never written to
 stdout or log lines.
+
+Also serves a local Unix send IPC socket (`send.sock`) so clients can outbound
+LXMF without stopping the daemon.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ import time
 from pathlib import Path
 
 from ratspeak_mcp.bridge import RatspeakBridge, data_home
+from ratspeak_mcp.send_ipc import SendIpcServer
 
 REANNOUNCE_SECONDS = 25 * 60  # ~25 minutes
 HEARTBEAT_SECONDS = 30
@@ -77,6 +81,14 @@ def main() -> None:
         # Safe public identity only
         print(f"ratspeak-bridge ready destination_hash={dest}", flush=True)
 
+    ipc = SendIpcServer(bridge, home=home, logger=log)
+    try:
+        ipc.start()
+    except Exception as e:
+        log.error("send IPC failed to start: %s", e)
+        # Presence still useful even if IPC bind fails
+        ipc = None
+
     stop = {"flag": False}
 
     def _handle_signal(signum: int, _frame: object) -> None:
@@ -87,22 +99,29 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _handle_signal)
 
     last_announce = time.time()
-    while not stop["flag"]:
-        time.sleep(HEARTBEAT_SECONDS)
-        if stop["flag"]:
-            break
-        now = time.time()
-        if now - last_announce >= REANNOUNCE_SECONDS:
+    try:
+        while not stop["flag"]:
+            time.sleep(HEARTBEAT_SECONDS)
+            if stop["flag"]:
+                break
+            now = time.time()
+            if now - last_announce >= REANNOUNCE_SECONDS:
+                try:
+                    result = bridge.announce()
+                    log.info(
+                        "re-announce ok destination_hash=%s tcp_online=%s",
+                        result.get("destination_hash"),
+                        result.get("tcp_online"),
+                    )
+                except Exception as e:
+                    log.warning("re-announce failed: %s", e)
+                last_announce = now
+    finally:
+        if ipc is not None:
             try:
-                result = bridge.announce()
-                log.info(
-                    "re-announce ok destination_hash=%s tcp_online=%s",
-                    result.get("destination_hash"),
-                    result.get("tcp_online"),
-                )
+                ipc.stop()
             except Exception as e:
-                log.warning("re-announce failed: %s", e)
-            last_announce = now
+                log.warning("send IPC stop error: %s", e)
 
     log.info("ratspeak-bridge stopped")
 
