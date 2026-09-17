@@ -371,7 +371,24 @@ class RatspeakBridge:
             desired_method=LXMF.LXMessage.DIRECT,
             include_ticket=True,
         )
+        delivery = {"event": threading.Event(), "state": None}
+
+        def _on_delivery(msg: Any) -> None:
+            delivery["state"] = getattr(msg, "state", None)
+            delivery["event"].set()
+
+        try:
+            lxm.register_delivery_callback(_on_delivery)
+        except Exception:
+            pass
+
         self._router.handle_outbound(lxm)
+
+        # Wait for LXMF delivery proof when possible (DIRECT=2 -> DELIVERED=8).
+        delivery_timeout = float(os.environ.get("RATSPEAK_DELIVERY_TIMEOUT", "45"))
+        delivery["event"].wait(delivery_timeout)
+        final_state = delivery["state"] if delivery["state"] is not None else getattr(lxm, "state", None)
+        delivered = final_state == getattr(LXMF.LXMessage, "DELIVERED", 8)
 
         mid = _hex(getattr(lxm, "hash", None)) or f"out-{time.time_ns()}"
         stored = StoredMessage(
@@ -390,12 +407,21 @@ class RatspeakBridge:
                 self._inbox = self._inbox[-INBOX_LIMIT:]
             self._persist_inbox()
 
+        method_val = getattr(lxm, "method", None)
+        method_name = {
+            getattr(LXMF.LXMessage, "OPPORTUNISTIC", 1): "OPPORTUNISTIC",
+            getattr(LXMF.LXMessage, "DIRECT", 2): "DIRECT",
+            getattr(LXMF.LXMessage, "PROPAGATED", 3): "PROPAGATED",
+        }.get(method_val, str(method_val))
+
         return {
-            "ok": True,
+            "ok": bool(delivered),
             "message_id": mid,
             "dest_hash": dest_hash,
             "subject": title,
-            "method": "DIRECT",
+            "method": method_name,
+            "lxmf_state": final_state,
+            "delivered": bool(delivered),
         }
 
     def inbox(self, limit: int = 20) -> list[dict[str, Any]]:
