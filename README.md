@@ -43,12 +43,17 @@ On first run the server will:
 | `lxmf/` | LXMF router storage |
 | `inbox.json` | Local message cache |
 | `destination_hash.txt` | Public 32-hex destination hash |
+| `daemon.log` | Always-on bridge file log |
+| `webhook_fired.json` | Debounce set of webhook-fired message ids |
 
 Environment:
 
 - `RATSPEAK_MCP_HOME` — data directory
 - `RATSPEAK_MCP_DISPLAY_NAME` — LXMF display name (default `Rat`)
 - `RATSPEAK_MCP_TCP_HOST` / `RATSPEAK_MCP_TCP_PORT` — hub (default Emerald)
+- `RATSPEAK_WEBHOOK_URL` — optional HTTP endpoint for inbound wake POSTs (if unset, daemon still runs for presence but never POSTs)
+- `RATSPEAK_WEBHOOK_KEY` — optional Bearer token (`Authorization: Bearer …`)
+- `RATSPEAK_WEBHOOK_ALLOWLIST` — comma-separated source destination hashes; if unset, defaults to `60c8a4197d1de58a53f3a95a1c97f4af` for this deploy
 
 Public Ratspeak TCP nodes:
 
@@ -101,6 +106,81 @@ Or via `uv`:
     }
   }
 }
+```
+
+
+## Always-on bridge + webhook wake
+
+The MCP stdio server only lives while the agent session is open. For continuous mesh presence (and optional HTTP wake-ups when allowlisted peers message you), run the **ratspeak-bridge** daemon.
+
+### Launch
+
+```bash
+cd /workspace/ratspeak-mcp
+uv sync
+uv run ratspeak-bridge
+# or:
+/workspace/ratspeak-mcp/.venv/bin/ratspeak-bridge
+```
+
+Behavior:
+
+- Starts `RatspeakBridge` (same identity / data home as the MCP tools)
+- Stays alive forever; re-announces about every **25 minutes**
+- Logs to `$RATSPEAK_MCP_HOME/daemon.log` (and minimal status on stdout — **never private keys**)
+- On inbound delivery: if `source_hash` is allowlisted **and** `RATSPEAK_WEBHOOK_URL` is set, POSTs JSON:
+
+```json
+{
+  "event": "ratspeak.inbound",
+  "message_id": "...",
+  "source_hash": "...",
+  "destination_hash": "...",
+  "title": "...",
+  "content_preview": "...",
+  "timestamp": 0
+}
+```
+
+`content_preview` is truncated to ~200 characters. Auth header `Authorization: Bearer ${RATSPEAK_WEBHOOK_KEY}` is sent when the key env is set. HTTP failures soft-fail (mesh loop never crashes). Fired `message_id`s are debounced in `webhook_fired.json`.
+
+**Allowlist default:** if `RATSPEAK_WEBHOOK_ALLOWLIST` is unset, only source hash `60c8a4197d1de58a53f3a95a1c97f4af` triggers webhooks (this deploy). Set the env to a comma-separated list to override.
+
+### systemd-ish example
+
+```ini
+[Unit]
+Description=Ratspeak always-on bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/workspace/ratspeak-mcp
+ExecStart=/workspace/ratspeak-mcp/.venv/bin/ratspeak-bridge
+Restart=always
+RestartSec=5
+Environment=RATSPEAK_MCP_HOME=/home/box/.ratspeak-mcp
+Environment=RATSPEAK_MCP_DISPLAY_NAME=Rat
+# Environment=RATSPEAK_WEBHOOK_URL=https://example.com/wake
+# Environment=RATSPEAK_WEBHOOK_KEY=replace-me
+# Environment=RATSPEAK_WEBHOOK_ALLOWLIST=60c8a4197d1de58a53f3a95a1c97f4af
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Or under a process supervisor / `nohup`:
+
+```bash
+nohup /workspace/ratspeak-mcp/.venv/bin/ratspeak-bridge >>/tmp/ratspeak-bridge.out 2>&1 &
+```
+
+### Unit tests
+
+```bash
+cd /workspace/ratspeak-mcp
+uv run python -m unittest tests.test_webhook -v
 ```
 
 ## Smoke test

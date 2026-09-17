@@ -203,6 +203,21 @@ class RatspeakBridge:
                 if len(self._inbox) > INBOX_LIMIT:
                     self._inbox = self._inbox[-INBOX_LIMIT:]
                 self._persist_inbox()
+            # Optional webhook wake for allowlisted peers (soft-fail; never crash mesh).
+            try:
+                from ratspeak_mcp.webhook import maybe_fire_inbound_webhook
+
+                maybe_fire_inbound_webhook(
+                    home=self.home,
+                    message_id=stored.message_id,
+                    source_hash=stored.source_hash,
+                    destination_hash=stored.destination_hash,
+                    title=stored.title,
+                    content=stored.content,
+                    timestamp=stored.timestamp,
+                )
+            except Exception as we:
+                RNS.log(f"ratspeak-mcp webhook error: {we}", RNS.LOG_WARNING)
         except Exception as e:
             RNS.log(f"ratspeak-mcp inbox store error: {e}", RNS.LOG_ERROR)
 

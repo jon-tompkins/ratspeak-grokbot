@@ -12,6 +12,7 @@ dependencies = [
 
 [project.scripts]
 ratspeak-mcp = "ratspeak_mcp:main"
+ratspeak-bridge = "ratspeak_mcp.daemon:main"
 
 [build-system]
 requires = ["uv_build>=0.12.14,<0.13.0"]
