@@ -1,0 +1,18 @@
+[project]
+name = "ratspeak-mcp"
+version = "0.1.0"
+description = "Local stdio MCP connector for Ratspeak / LXMF (Reticulum mesh messaging)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "lxmf>=1.1.1",
+    "mcp>=1.0",
+    "rns>=1.5.4",
+]
+
+[project.scripts]
+ratspeak-mcp = "ratspeak_mcp:main"
+
+[build-system]
+requires = ["uv_build>=0.12.14,<0.13.0"]
+build-backend = "uv_build"
