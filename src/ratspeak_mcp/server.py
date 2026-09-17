@@ -8,6 +8,7 @@ from typing import Any
 from mcp.server import MCPServer
 
 from ratspeak_mcp.bridge import get_bridge
+from ratspeak_mcp.send_ipc import ipc_available, send_via_ipc
 
 mcp = MCPServer(
     "ratspeak-mcp",
@@ -20,7 +21,9 @@ mcp = MCPServer(
         "Use ratspeak_status / ratspeak_identity to learn this node's destination hash. "
         "Share that hash with peers on Ratspeak. Use ratspeak_send to message a peer "
         "destination hash, and ratspeak_inbox / ratspeak_read for received messages. "
-        "Call ratspeak_announce after long idle periods so peers can find you."
+        "Call ratspeak_announce after long idle periods so peers can find you. "
+        "When ratspeak-bridge is running, ratspeak_send prefers the local send.sock IPC "
+        "so outbound works without stopping the daemon."
     ),
 )
 
@@ -54,11 +57,35 @@ def ratspeak_announce() -> str:
 def ratspeak_send(dest_hash: str, body: str, subject: str = "") -> str:
     """Send a text LXMF message to a destination hash.
 
+    Prefers the always-on daemon Unix IPC (`send.sock`) when present so the
+    primary RNS holder can send without stopping. Falls back to an in-process
+    bridge only if IPC is unavailable.
+
     Args:
         dest_hash: 32-character hex LXMF destination hash of the recipient.
         body: Message text body.
         subject: Optional subject/title.
     """
+    if ipc_available():
+        try:
+            result = send_via_ipc(
+                dest_hash=dest_hash,
+                body=body,
+                subject=subject or None,
+            )
+            return _json(result)
+        except Exception as e:
+            # Soft-fallback to in-process if IPC exists but fails unexpectedly.
+            # (Often still fails with share_instance secondary — surface error.)
+            try:
+                bridge = get_bridge()
+                result = bridge.send(
+                    dest_hash=dest_hash, body=body, subject=subject or None
+                )
+                return _json(result)
+            except Exception:
+                return _json({"ok": False, "error": f"IPC send failed: {e}"})
+
     bridge = get_bridge()
     result = bridge.send(dest_hash=dest_hash, body=body, subject=subject or None)
     return _json(result)
@@ -89,5 +116,7 @@ def ratspeak_read(message_id: str) -> str:
 
 def run() -> None:
     # Eager-start bridge so identity/hash exist even before first tool call.
+    # When the always-on daemon holds primary RNS, this may attach as shared
+    # instance; outbound send still prefers send.sock IPC when available.
     get_bridge()
     mcp.run(transport="stdio")
