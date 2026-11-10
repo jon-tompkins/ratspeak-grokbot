@@ -8,3 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local deploy secrets — never commit
+webhook_key.txt
+.env

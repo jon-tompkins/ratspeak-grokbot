@@ -45,6 +45,8 @@ def handle_request(
     *,
     send_fn: SendFn | None = None,
     status_fn: StatusFn | None = None,
+    webhook_retry_fn: Callable[[], dict[str, Any]] | None = None,
+    home: Path | None = None,
 ) -> dict[str, Any]:
     """Parse and dispatch one IPC request dict. Pure enough for unit tests."""
     if not isinstance(req, dict):
@@ -63,7 +65,7 @@ def handle_request(
         try:
             st = status_fn()
             # Public fields only — never private keys.
-            return {
+            out = {
                 "ok": True,
                 "started": st.get("started"),
                 "destination_hash": st.get("destination_hash"),
@@ -72,6 +74,11 @@ def handle_request(
                 "display_name": st.get("display_name"),
                 "data_home": st.get("data_home"),
             }
+            if home is not None:
+                from ratspeak_mcp.webhook import queue_stats
+
+                out.update(queue_stats(home))
+            return out
         except Exception as e:
             return _error_response(str(e))
 
@@ -105,6 +112,19 @@ def handle_request(
                 dest_hash=dest_hash.strip().lower().replace(":", ""),
                 subject=subject or "",
             )
+
+    if op == "webhook_retry":
+        if webhook_retry_fn is None:
+            return _error_response("webhook_retry not available")
+        try:
+            result = webhook_retry_fn()
+            if not isinstance(result, dict):
+                return _error_response("webhook_retry returned non-dict")
+            out = dict(result)
+            out.setdefault("ok", True)
+            return out
+        except Exception as e:
+            return _error_response(str(e))
 
     return _error_response(f"unknown op: {op}")
 
@@ -240,10 +260,17 @@ class SendIpcServer:
         else:
             self._log.info("IPC op=%s", op)
 
+        def _webhook_retry() -> dict[str, Any]:
+            from ratspeak_mcp.webhook import retry_pending_webhooks
+
+            return retry_pending_webhooks(self._home, logger=self._log)
+
         resp = handle_request(
             req,
             send_fn=self._bridge.send,
             status_fn=self._bridge.status,
+            webhook_retry_fn=_webhook_retry,
+            home=self._home,
         )
         conn.sendall(encode_response(resp))
 

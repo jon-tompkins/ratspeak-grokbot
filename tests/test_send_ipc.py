@@ -139,6 +139,43 @@ class HandleRequestTests(unittest.TestCase):
         self.assertEqual(json.loads(raw), {"ok": True})
 
 
+    def test_webhook_retry_op(self) -> None:
+        called = {"n": 0}
+
+        def retry_fn():
+            called["n"] += 1
+            return {"ok": True, "delivered": 1, "failed": 0, "pending": 0}
+
+        resp = handle_request({"op": "webhook_retry"}, webhook_retry_fn=retry_fn)
+        self.assertTrue(resp["ok"])
+        self.assertEqual(resp["delivered"], 1)
+        self.assertEqual(called["n"], 1)
+
+    def test_status_includes_queue_stats(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            home = Path(tmp.name)
+
+            def status_fn():
+                return {
+                    "started": True,
+                    "destination_hash": "abcd" * 8,
+                    "tcp_online": True,
+                    "inbox_count": 0,
+                    "display_name": "Rat",
+                    "data_home": str(home),
+                }
+
+            resp = handle_request({"op": "status"}, status_fn=status_fn, home=home)
+            self.assertTrue(resp["ok"])
+            self.assertIn("webhook_pending", resp)
+            self.assertEqual(resp["webhook_pending"], 0)
+            self.assertIn("webhook_url_set", resp)
+            self.assertIn("webhook_key_set", resp)
+        finally:
+            tmp.cleanup()
+
+
 class SendIpcServerIntegrationTests(unittest.TestCase):
     """Socket round-trip with mocked bridge — no live mesh."""
 

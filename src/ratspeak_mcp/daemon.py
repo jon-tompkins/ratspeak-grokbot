@@ -19,6 +19,11 @@ from pathlib import Path
 
 from ratspeak_mcp.bridge import RatspeakBridge, data_home
 from ratspeak_mcp.send_ipc import SendIpcServer
+from ratspeak_mcp.webhook import (
+    queue_has_due,
+    queue_stats,
+    retry_pending_webhooks,
+)
 
 REANNOUNCE_SECONDS = 25 * 60  # ~25 minutes
 HEARTBEAT_SECONDS = 30
@@ -53,13 +58,16 @@ def main() -> None:
     host = os.environ.get("RATSPEAK_MCP_TCP_HOST", "2.ratspeak.org")
     port = int(os.environ.get("RATSPEAK_MCP_TCP_PORT", "4242"))
 
+    stats = queue_stats(home)
     log.info(
-        "ratspeak-bridge starting home=%s display=%s tcp=%s:%s webhook_url_set=%s",
+        "ratspeak-bridge starting home=%s display=%s tcp=%s:%s webhook_url_set=%s webhook_key_set=%s queue_pending=%s",
         home,
         display,
         host,
         port,
-        bool((os.environ.get("RATSPEAK_WEBHOOK_URL") or "").strip()),
+        stats["webhook_url_set"],
+        stats["webhook_key_set"],
+        stats["webhook_pending"],
     )
 
     bridge = RatspeakBridge(display_name=display, tcp_host=host, tcp_port=port, home=home)
@@ -98,13 +106,37 @@ def main() -> None:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    try:
+        drained = retry_pending_webhooks(home, logger=log)
+        if drained.get("pending") or drained.get("delivered") or drained.get("failed"):
+            log.info(
+                "webhook queue drain delivered=%s failed=%s pending=%s",
+                drained.get("delivered"),
+                drained.get("failed"),
+                drained.get("pending"),
+            )
+    except Exception as e:
+        log.warning("webhook queue drain error: %s", e)
+
     last_announce = time.time()
     try:
         while not stop["flag"]:
-            time.sleep(HEARTBEAT_SECONDS)
+            sleep_for = 1.0 if queue_has_due(home) else HEARTBEAT_SECONDS
+            time.sleep(sleep_for)
             if stop["flag"]:
                 break
             now = time.time()
+            try:
+                retried = retry_pending_webhooks(home, logger=log)
+                if retried.get("delivered") or retried.get("failed"):
+                    log.info(
+                        "webhook queue retry delivered=%s failed=%s pending=%s",
+                        retried.get("delivered"),
+                        retried.get("failed"),
+                        retried.get("pending"),
+                    )
+            except Exception as e:
+                log.warning("webhook queue retry error: %s", e)
             if now - last_announce >= REANNOUNCE_SECONDS:
                 try:
                     result = bridge.announce()
