@@ -45,7 +45,10 @@ On first run the server will:
 | `destination_hash.txt` | Public 32-hex destination hash |
 | `daemon.log` | Always-on bridge file log |
 | `send.sock` | Unix IPC for outbound send while daemon holds RNS (mode `0600`) |
-| `webhook_fired.json` | Debounce set of webhook-fired message ids |
+| `webhook_fired.json` | Debounce set of successfully delivered webhook message ids |
+| `webhook_queue.json` | On-disk retry queue for webhook deliveries not yet 2xx |
+| `webhook_key.txt` | Optional Bearer token file (mode `0600`; never commit) |
+| `watchdog-state.json` | Local health-check state for `scripts/ratspeak_watchdog.py` |
 
 Environment:
 
@@ -54,6 +57,7 @@ Environment:
 - `RATSPEAK_MCP_TCP_HOST` / `RATSPEAK_MCP_TCP_PORT` — hub (default Emerald)
 - `RATSPEAK_WEBHOOK_URL` — optional HTTP endpoint for inbound wake POSTs (if unset, daemon still runs for presence but never POSTs)
 - `RATSPEAK_WEBHOOK_KEY` — optional Bearer token (`Authorization: Bearer …`)
+- `RATSPEAK_WEBHOOK_KEY_FILE` — optional path to a file containing the Bearer token (default `$RATSPEAK_MCP_HOME/webhook_key.txt`)
 - `RATSPEAK_WEBHOOK_ALLOWLIST` — comma-separated source destination hashes; if unset, defaults to `60c8a4197d1de58a53f3a95a1c97f4af` for this deploy
 
 Public Ratspeak TCP nodes:
@@ -144,7 +148,18 @@ Behavior:
 }
 ```
 
-`content_preview` is truncated to ~200 characters. Auth header `Authorization: Bearer ${RATSPEAK_WEBHOOK_KEY}` is sent when the key env is set. HTTP failures soft-fail (mesh loop never crashes). Fired `message_id`s are debounced in `webhook_fired.json`.
+`content_preview` is truncated to ~200 characters. Auth header `Authorization: Bearer ${RATSPEAK_WEBHOOK_KEY}` is sent when the key env (or `webhook_key.txt`) is set. HTTP failures soft-fail (mesh loop never crashes): the payload is persisted in `webhook_queue.json` and retried with exponential backoff (1s, 2s, 4s, … capped at 15 minutes) until a 2xx response. Only then is the `message_id` recorded in `webhook_fired.json`. Each attempt is logged with `message_id`, attempt number, and a secret-free reason (for example `HTTP 401` or `URLError`) — never the URL, key, or Authorization header.
+
+The daemon drains the queue on startup and on its heartbeat. You can also retry on demand (no mesh traffic):
+
+```bash
+ratspeak-webhook --status
+ratspeak-webhook --retry
+# or force all items, ignoring backoff:
+ratspeak-webhook --force
+```
+
+The send IPC also accepts `{"op": "webhook_retry"}` and includes `webhook_pending`, `webhook_url_set`, and `webhook_key_set` (booleans only) in `{"op": "status"}`.
 
 **Allowlist default:** if `RATSPEAK_WEBHOOK_ALLOWLIST` is unset, only source hash `60c8a4197d1de58a53f3a95a1c97f4af` triggers webhooks (this deploy). Set the env to a comma-separated list to override.
 
@@ -180,6 +195,24 @@ ratspeak-send --subject "hi" DEST_HASH "body text"
 ```
 
 MCP tool `ratspeak_send` **prefers this IPC** when `send.sock` exists, and only falls back to an in-process bridge if the socket is unavailable.
+
+### Zero-inference watchdog
+
+`scripts/ratspeak_watchdog.py` is a small looping process (no model, no LXMF traffic to peers). About every 5 minutes it:
+
+1. Checks that a `ratspeak-bridge` process is running, `send.sock` exists, and IPC `ping` / `status` succeed
+2. Retries any due items in `webhook_queue.json`
+3. If the bridge is unhealthy on two consecutive checks, performs a clean restart: `pkill` the bridge, wait until `pgrep` is empty, `rm -f send.sock`, then run the start script
+
+It does **not** send test messages to the owner's address. It also does not send a self-addressed loopback by default — a silent stall where the process and IPC still respond would not be detected. Interface `tcp_online` flaps are logged but do not trigger a restart on their own.
+
+There is typically no `cron` on the Grok Bot box, and a user systemd bus may be unavailable. Run the watchdog as a background loop and start it from your bridge start script so it comes back after a box restart (it does not survive a box restart by itself):
+
+```bash
+nohup /workspace/ratspeak-mcp/.venv/bin/python /workspace/ratspeak-mcp/scripts/ratspeak_watchdog.py --loop --interval 300 >>/tmp/ratspeak-watchdog.out 2>&1 &
+```
+
+A one-shot check (no restart) is `python scripts/ratspeak_watchdog.py --no-restart`.
 
 ### systemd-ish example
 
